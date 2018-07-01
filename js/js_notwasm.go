@@ -7,21 +7,26 @@
 package js
 
 import (
-	"fmt"
+	"reflect"
 	"unsafe"
 
 	"github.com/gopherjs/gopherjs/js"
 )
 
-var (
-	Undefined = Value{v: js.Undefined}
-	Null      = Value{v: nil}
-	Global    = Value{v: js.Global}
-)
+func Global() Value {
+	return Value{v: js.Global}
+}
+
+func Null() Value {
+	return Value{v: nil}
+}
+
+func Undefined() Value {
+	return Value{v: js.Undefined}
+}
 
 type Callback struct {
-	f     func([]Value)
-	flags EventCallbackFlag
+	Value
 }
 
 type EventCallbackFlag int
@@ -32,8 +37,39 @@ const (
 	StopImmediatePropagation
 )
 
+func funcToValue(flags EventCallbackFlag, f func([]Value)) Value {
+	return Value{
+		v: id.Invoke(func(args ...*js.Object) {
+			if len(args) > 0 {
+				e := args[0]
+				if flags&PreventDefault != 0 {
+					e.Call("preventDefault")
+				}
+				if flags&StopPropagation != 0 {
+					e.Call("stopPropagation")
+				}
+				if flags&StopImmediatePropagation != 0 {
+					e.Call("stopImmediatePropagation")
+				}
+			}
+
+			// Call the function asyncly to emulate Wasm's Callback more
+			// precisely.
+			go func() {
+				newArgs := []Value{}
+				for _, arg := range args {
+					newArgs = append(newArgs, Value{v: arg})
+				}
+				f(newArgs)
+			}()
+		}),
+	}
+}
+
 func NewCallback(f func([]Value)) Callback {
-	return Callback{f: f}
+	return Callback{
+		Value: funcToValue(0, f),
+	}
 }
 
 func NewEventCallback(flags EventCallbackFlag, fn func(event Value)) Callback {
@@ -42,20 +78,20 @@ func NewEventCallback(flags EventCallbackFlag, fn func(event Value)) Callback {
 		fn(e)
 	}
 	return Callback{
-		f:     f,
-		flags: flags,
+		Value: funcToValue(flags, f),
 	}
 }
 
-func (c Callback) Close() {
+func (c Callback) Release() {
+	c.Value = Null()
 }
 
 type Error struct {
-	e *js.Error
+	Value
 }
 
 func (e Error) Error() string {
-	return e.e.Error()
+	return "JavaScript error: " + e.Get("message").String()
 }
 
 type Value struct {
@@ -79,40 +115,15 @@ func ValueOf(x interface{}) Value {
 	case Value:
 		return x
 	case Callback:
-		return Value{
-			v: id.Invoke(func(args ...*js.Object) {
-				if len(args) > 0 {
-					e := args[0]
-					if x.flags&PreventDefault != 0 {
-						e.Call("preventDefault")
-					}
-					if x.flags&StopPropagation != 0 {
-						e.Call("stopPropagation")
-					}
-					if x.flags&StopImmediatePropagation != 0 {
-						e.Call("stopImmediatePropagation")
-					}
-				}
-
-				// Call the function asyncly to emulate Wasm's Callback more
-				// precisely.
-				go func() {
-					newArgs := []Value{}
-					for _, arg := range args {
-						newArgs = append(newArgs, Value{v: arg})
-					}
-					x.f(newArgs)
-				}()
-			}),
-		}
+		return x.Value
 	case nil:
-		return Null
+		return Null()
 	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, unsafe.Pointer, string, []byte:
 		return Value{v: id.Invoke(x)}
 	case []int8, []int16, []int32, []int64, []uint16, []uint32, []uint64, []float32, []float64:
 		return Value{v: id.Invoke(x)}
 	default:
-		panic(fmt.Sprintf("invalid arg: %T", x))
+		panic(`invalid arg: ` + reflect.TypeOf(x).String())
 	}
 }
 
